@@ -1,0 +1,266 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <time.h>
+#include <GxEPD2_BW.h>
+#include <ArduinoJson.h>
+#include <SPI.h>
+
+// ---------------- DISPLAY ----------------
+GxEPD2_BW<GxEPD2_290_T94, GxEPD2_290_T94::HEIGHT> display(
+  GxEPD2_290_T94(5, 21, 22, 4)
+);
+
+// ---------------- WIFI ----------------
+const char* ssid = "iQOO Z3 5G";
+const char* password = "siddhant";
+
+// ---------------- NTP ----------------
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 19800;
+const int daylightOffset_sec = 0;
+
+// ---------------- SERVER ----------------
+const char* heartbeatURL = "http://10.17.192.108:5000/heartbeat";
+const char* nextEventURL = "http://10.17.192.108:5000/next_event";
+const char* imageBaseURL = "http://10.17.192.108:5000/image/";
+
+// ---------------- GLOBALS ----------------
+unsigned long scheduledTime = 0;
+RTC_DATA_ATTR char imageFilename[64] = {0};
+
+uint8_t imageBuffer[296 * 128 / 8];
+
+// --------------------------------------------------
+
+void connectWiFi() {
+
+  WiFi.begin(ssid, password);
+
+  Serial.print("Connecting to WiFi");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nConnected!");
+  Serial.print("ESP IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+// --------------------------------------------------
+
+void sendHeartbeat() {
+
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  http.begin(heartbeatURL);
+  http.addHeader("Content-Type", "application/json");
+  http.POST("{}");
+  http.end();
+}
+
+// --------------------------------------------------
+
+void getNextEvent() {
+
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  http.begin(nextEventURL);
+
+  int code = http.GET();
+
+  if (code == 200) {
+
+    String payload = http.getString();
+
+    DynamicJsonDocument doc(256);
+    deserializeJson(doc, payload);
+
+    scheduledTime = doc["timestamp"];
+
+    if (doc["image"].is<const char*>()) {
+        strcpy(imageFilename, doc["image"]);
+    }
+
+    Serial.print("Next event time: ");
+    Serial.println(scheduledTime);
+
+    Serial.print("Image filename: ");
+    Serial.println(String(imageFilename));
+  }
+
+  http.end();
+}
+
+// --------------------------------------------------
+
+void sleepSeconds(long seconds) {
+
+  if (seconds <= 0) seconds = 1;
+
+  Serial.print("Sleeping for ");
+  Serial.print(seconds);
+  Serial.println(" seconds");
+
+  esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
+
+  Serial.flush();
+  esp_deep_sleep_start();
+}
+
+// --------------------------------------------------
+
+void sleepUntil(unsigned long targetTime) {
+
+  time_t now = time(NULL);
+
+  long secondsToSleep = targetTime - now;
+
+  Serial.print("Current time: ");
+  Serial.println(now);
+
+  Serial.print("Target time: ");
+  Serial.println(targetTime);
+
+  Serial.print("Sleep seconds: ");
+  Serial.println(secondsToSleep);
+
+  sleepSeconds(secondsToSleep);
+}
+
+// --------------------------------------------------
+
+bool downloadImage() {
+
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  String imageURL = String(imageBaseURL) + String(imageFilename);
+
+  Serial.print("Downloading: ");
+  Serial.println(imageURL);
+
+  HTTPClient http;
+  http.begin(imageURL);
+
+  int httpCode = http.GET();
+
+  if (httpCode != 200) {
+
+    Serial.println("HTTP error downloading image");
+    http.end();
+    return false;
+  }
+
+  WiFiClient* stream = http.getStreamPtr();
+
+  int index = 0;
+
+  while (stream->available() && index < sizeof(imageBuffer)) {
+
+    imageBuffer[index++] = stream->read();
+  }
+
+  http.end();
+
+  if (index != sizeof(imageBuffer)) {
+
+    Serial.println("Wrong image size!");
+    return false;
+  }
+
+  Serial.println("Image downloaded successfully");
+
+  return true;
+}
+
+// --------------------------------------------------
+
+void updateDisplay() {
+
+  display.firstPage();
+
+  do {
+
+    display.fillScreen(GxEPD_WHITE);
+    display.drawBitmap(0, 0, imageBuffer, 296, 128, GxEPD_BLACK);
+
+  } while (display.nextPage());
+
+  Serial.println("Display updated");
+}
+
+// --------------------------------------------------
+
+void setup() {
+
+  Serial.begin(115200);
+
+  display.init();
+  display.setRotation(1);
+
+  esp_sleep_wakeup_cause_t wakeupReason = esp_sleep_get_wakeup_cause();
+
+  connectWiFi();
+
+  // Sync time
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+  struct tm timeinfo;
+
+  while (!getLocalTime(&timeinfo)) {
+
+    Serial.println("Waiting for NTP time...");
+    delay(1000);
+  }
+
+  Serial.println("Time synced!");
+
+  sendHeartbeat();
+
+  // --------------------------------------------------
+
+  if (wakeupReason == ESP_SLEEP_WAKEUP_TIMER) {
+
+    Serial.println("Woke from timer");
+
+    if (strlen(imageFilename) > 0) {
+
+      if (downloadImage()) {
+
+        updateDisplay();
+
+        // Clear filename after use
+        memset(imageFilename, 0, sizeof(imageFilename));
+
+        Serial.println("Image filename cleared");
+      }
+    }
+  }
+
+  // --------------------------------------------------
+
+  // Ask server for next event
+  getNextEvent();
+
+  if (scheduledTime > 0) {
+
+    sleepUntil(scheduledTime);
+
+  } else {
+
+    Serial.println("No events scheduled");
+
+    // Wake periodically to check server after 5 min
+    sleepSeconds(300);
+  }
+}
+
+// --------------------------------------------------
+
+void loop() {
+
+  delay(1000);
+}
