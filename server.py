@@ -4,6 +4,8 @@ import os
 import time
 from datetime import datetime
 import pytz
+import fitz  # PyMuPDF
+import io
 
 app = Flask(__name__)
 
@@ -341,13 +343,13 @@ def home():
                 <div class="card-title">📤 Upload Image</div>
                 
                 <div class="form-group">
-                    <label>Select Image</label>
+                    <label>Select Image or PDF</label>
                     <div class="upload-zone" id="upload-zone">
                         <div class="upload-icon">⬆️</div>
-                        <div class="upload-text">Drop image here or <span style="color: #3b82f6; cursor: pointer;" onclick="document.getElementById(\'file-input\').click();">browse</span></div>
-                        <div class="upload-hint">PNG, JPG — max 10 MB</div>
+                        <div class="upload-text">Drop file here or <span style="color: #3b82f6; cursor: pointer;" onclick="document.getElementById('file-input').click();">browse</span></div>
+                        <div class="upload-hint">PNG, JPG, PDF (first page only) — max 10 MB</div>
                     </div>
-                    <input type="file" id="file-input" name="file" accept="image/*" onchange="processImage(event)">
+                    <input type="file" id="file-input" name="file" accept="image/*,.pdf" onchange="processImage(event)">
                 </div>
                 
                 <div class="preview-section" id="preview-section" style="display: none;">
@@ -383,31 +385,48 @@ def home():
             const file = event.target.files[0];
             if (!file) return;
             
-            const reader = new FileReader();
-            reader.onload = function(e) {
-                const img = new Image();
-                img.onload = function() {
-                    const canvas = document.getElementById("canvas");
-                    const ctx = canvas.getContext("2d");
-                    
-                    ctx.drawImage(img, 0, 0, 296, 128);
-                    const imageData = ctx.getImageData(0, 0, 296, 128);
-                    const data = imageData.data;
-                    
-                    for (let i = 0; i < data.length; i += 4) {
-                        const avg = (data[i] + data[i+1] + data[i+2]) / 3;
-                        const bw = avg > 128 ? 255 : 0;
-                        data[i] = bw;
-                        data[i+1] = bw;
-                        data[i+2] = bw;
-                    }
-                    
-                    ctx.putImageData(imageData, 0, 0);
-                    document.getElementById("preview-section").style.display = "block";
+            // Check if it's a PDF
+            if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
+                document.getElementById("preview-section").style.display = "block";
+                const canvas = document.getElementById("canvas");
+                const ctx = canvas.getContext("2d");
+                ctx.fillStyle = "#999";
+                ctx.fillRect(0, 0, 296, 128);
+                ctx.fillStyle = "#fff";
+                ctx.font = "14px Arial";
+                ctx.textAlign = "center";
+                ctx.fillText("PDF Preview:", 148, 50);
+                ctx.font = "12px Arial";
+                ctx.fillText(file.name, 148, 70);
+                ctx.fillText("(First page will be displayed)", 148, 88);
+            } else {
+                // Process as image
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const img = new Image();
+                    img.onload = function() {
+                        const canvas = document.getElementById("canvas");
+                        const ctx = canvas.getContext("2d");
+                        
+                        ctx.drawImage(img, 0, 0, 296, 128);
+                        const imageData = ctx.getImageData(0, 0, 296, 128);
+                        const data = imageData.data;
+                        
+                        for (let i = 0; i < data.length; i += 4) {
+                            const avg = (data[i] + data[i+1] + data[i+2]) / 3;
+                            const bw = avg > 128 ? 255 : 0;
+                            data[i] = bw;
+                            data[i+1] = bw;
+                            data[i+2] = bw;
+                        }
+                        
+                        ctx.putImageData(imageData, 0, 0);
+                        document.getElementById("preview-section").style.display = "block";
+                    };
+                    img.src = e.target.result;
                 };
-                img.src = e.target.result;
-            };
-            reader.readAsDataURL(file);
+                reader.readAsDataURL(file);
+            }
         }
         
         const uploadZone = document.getElementById("upload-zone");
@@ -472,7 +491,20 @@ def upload():
     print("Current timestamp:",int(time.time()))
     print("-----------------------\n")
 
-    img = Image.open(file)
+    # Check if file is a PDF
+    if file.filename.endswith('.pdf') or file.content_type == 'application/pdf':
+        # Convert PDF to image (first page only)
+        pdf_bytes = file.read()
+        pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page = pdf_doc[0]  # Get first page
+        # Render page to image (pixmap)
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))  # 1.5x zoom for better quality
+        img_data = pix.tobytes("png")
+        img = Image.open(io.BytesIO(img_data))
+    else:
+        # Process as image
+        img = Image.open(file)
+    
     img = img.resize((296,128))
     img = img.convert("1")
 
@@ -682,26 +714,26 @@ def image(filename):
     return "File not found",404
 
 
-# ---------------- MARK DISPLAYED & CLEANUP ----------------
+# # ---------------- MARK DISPLAYED & CLEANUP ----------------
 
-@app.route("/mark_displayed/<filename>", methods=["POST"])
-def mark_displayed(filename):
-    global events
+# @app.route("/mark_displayed/<filename>", methods=["POST"])
+# def mark_displayed(filename):
+#     global events
     
-    # Remove from events list
-    events = [e for e in events if e["file"] != filename]
+#     # Remove from events list
+#     events = [e for e in events if e["file"] != filename]
     
-    # Delete the file
-    path = os.path.join(UPLOAD_FOLDER, filename)
-    if os.path.exists(path):
-        os.remove(path)
-        print(f"Deleted: {filename}")
+#     # Delete the file
+#     path = os.path.join(UPLOAD_FOLDER, filename)
+#     if os.path.exists(path):
+#         os.remove(path)
+#         print(f"Deleted: {filename}")
     
-    return jsonify({"status": "File deleted"})
+#     return jsonify({"status": "File deleted"})
 
 
 # ---------------- SERVER START ----------------
 
 if __name__=="__main__":
-
-    app.run(host="0.0.0.0",port=5000)
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
